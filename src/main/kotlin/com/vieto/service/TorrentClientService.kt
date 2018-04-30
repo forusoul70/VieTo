@@ -4,6 +4,7 @@ import com.turn.ttorrent.client.Client
 import com.turn.ttorrent.client.SharedTorrent
 import com.turn.ttorrent.common.Torrent
 import com.vieto.controller.storage.FileSystemStorageService
+import com.vieto.controller.storage.StorageException
 import com.vieto.database.TorrentRepository
 import com.vieto.model.Status
 import com.vieto.model.TorrentModel
@@ -15,18 +16,20 @@ import org.springframework.stereotype.Service
 import org.springframework.util.StringUtils
 import java.io.File
 import java.net.InetAddress
+import java.util.*
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 
 @Service
 class TorrentClientService constructor(@Autowired val torrentRepository: TorrentRepository,
-                                       @Autowired val storageService: FileSystemStorageService) {
+                                       @Autowired val storageService: FileSystemStorageService): Observer {
+
     companion object {
         const val TORRENT_CLIENT_POOL_COUNT = 2
     }
 
     private val clientSemaphore = Semaphore(TORRENT_CLIENT_POOL_COUNT)
-    private val currentDownloadMap = HashMap<String, Torrent>()
+    private val currentDownloadMap = HashMap<String, Client>()
     private val downloadProgressCache = HashMap<String, Float>()
     private val logger = LoggerFactory.getLogger(TorrentClientService::class.java)
 
@@ -41,11 +44,11 @@ class TorrentClientService constructor(@Autowired val torrentRepository: Torrent
                         .body("Failed to load file")
             }
             val torrentRequest = Torrent.load(file)
-            var torrentModel = TorrentModel(torrentRequest.name, torrentRequest.filenames, torrentRequest.hexInfoHash,
-                    torrentRequest.size, fileUri, torrentRequest.comment, torrentRequest.createdBy)
-            torrentModel = torrentRepository.insert(torrentModel)
             val status = requestDownload(torrentRequest)
             if (status.is2xxSuccessful) {
+                var torrentModel = TorrentModel(torrentRequest.name, torrentRequest.filenames, torrentRequest.hexInfoHash,
+                        torrentRequest.size, fileUri, torrentRequest.comment, torrentRequest.createdBy)
+                torrentModel = torrentRepository.insert(torrentModel)
                 torrentModel.status = Status.Downloading
                 torrentRepository.save(torrentModel)
             }
@@ -75,33 +78,8 @@ class TorrentClientService constructor(@Autowired val torrentRepository: Torrent
             client.setMaxDownloadRate(50.0)
             client.setMaxUploadRate(50.0)
             client.download()
-            client.addObserver { o, _ ->
-                val c = o as Client
-                val hash = torrentRequest.hexInfoHash
-
-                synchronized(downloadProgressCache) {
-                    val progress = c.torrent.completion
-                    downloadProgressCache[hash] = progress
-                }
-
-                if (c.state == Client.ClientState.DONE || c.state == Client.ClientState.SEEDING) {
-                    synchronized(currentDownloadMap) {
-                        currentDownloadMap.remove(hash)
-                    }
-                    c.stop()
-                    clientSemaphore.release()
-
-                    // update db
-                    val torrentModel = torrentRepository.findByHash(hash)
-                    if (torrentModel == null) {
-                        logger.warn("[requestDownload] Failed to find torrent model by hash. name: $hash hash: ${torrentRequest.name}")
-                        return@addObserver
-                    }
-                    torrentModel.status = Status.Success
-                    torrentRepository.save(torrentModel)
-                }
-            }
-            currentDownloadMap[torrentRequest.hexInfoHash] = torrentRequest
+            client.addObserver(this)
+            currentDownloadMap[torrentRequest.hexInfoHash] = client
         }
         return HttpStatus.OK
     }
@@ -109,6 +87,61 @@ class TorrentClientService constructor(@Autowired val torrentRepository: Torrent
     fun getDownloadProgress(hash: String): Float {
         return synchronized(downloadProgressCache) {
             downloadProgressCache[hash]?:0.0f
+        }
+    }
+
+    fun deleteByHash(hash: String): ResponseEntity<Any> {
+        val torrentModel = torrentRepository.findByHash(hash) ?: return ResponseEntity.badRequest().body("Failed to find torrent model")
+        var canceled = false
+        synchronized(currentDownloadMap) {
+            currentDownloadMap.remove(hash)?.let {
+                it.deleteObserver(this)
+                it.stop()
+                clientSemaphore.release()
+                canceled = true
+            }
+            return try {
+                storageService.removeFolder(hash)
+                torrentRepository.delete(torrentModel)
+                logger.info("[deleteByHash] ${torrentModel.name}, cancel ? $canceled")
+                ResponseEntity.ok("Success, cancel ? $canceled")
+            } catch (e: StorageException) {
+                ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(e.message)
+            }
+        }
+    }
+
+    override fun update(o: Observable?, arg: Any?) {
+        val c = o as Client
+        val hash = c.torrent.hexInfoHash
+
+        synchronized(downloadProgressCache) {
+            val progress = c.torrent.completion
+            downloadProgressCache[hash] = progress
+        }
+
+        if (c.state == Client.ClientState.DONE ||
+                c.state == Client.ClientState.SEEDING ||
+                c.state == Client.ClientState.ERROR) {
+            synchronized(currentDownloadMap) {
+                currentDownloadMap.remove(hash)
+            }
+            c.stop()
+            clientSemaphore.release()
+
+            // update db
+            val torrentModel = torrentRepository.findByHash(hash)
+            if (torrentModel == null) {
+                logger.warn("[requestDownload] Failed to find torrent model by hash. name: $hash hash: ${c.torrent.name}")
+                return
+            }
+            torrentModel.status = when (c.state) {
+                Client.ClientState.DONE, Client.ClientState.SEEDING  -> Status.Success
+                Client.ClientState.ERROR -> Status.Failure
+                else -> torrentModel.status
+            }
+            torrentRepository.save(torrentModel)
+            downloadProgressCache.remove(hash)
         }
     }
 }

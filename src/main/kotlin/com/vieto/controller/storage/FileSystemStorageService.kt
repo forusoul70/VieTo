@@ -3,7 +3,6 @@ package com.vieto.controller.storage
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Service
 import org.springframework.util.FileSystemUtils
-import org.springframework.util.StringUtils
 import org.springframework.web.multipart.MultipartFile
 import java.io.File
 import java.io.IOException
@@ -48,5 +47,20 @@ class FileSystemStorageService @Autowired constructor(properties: StoragePropert
 
     override fun deleteAll() {
         FileSystemUtils.deleteRecursively(rootLocation.toFile())
+    }
+
+    override fun removeRootPathIfExist(path: Path): Path {
+        return rootLocation.relativize(path)
+    }
+
+    override fun removeFolder(folder: String) {
+        val target = load(folder).toFile()
+        if (target.exists() == false) {
+            return
+        }
+        if (target.isDirectory == false) {
+            throw StorageException("Target is not folder")
+        }
+        target.deleteRecursively()
     }
 }

@@ -11,4 +11,7 @@ interface StorageService {
     fun store(file: MultipartFile, fileName: String): File
     fun load(fileName: String): Path
     fun deleteAll()
+    fun removeRootPathIfExist(path: Path): Path
+    @Throws(StorageException::class)
+    fun removeFolder(folder: String)
 }
