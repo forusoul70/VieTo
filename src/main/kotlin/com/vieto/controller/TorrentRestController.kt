@@ -28,8 +28,8 @@ class TorrentRestController @Autowired constructor(@Autowired protected val torr
     }
 
     @RequestMapping(method = [RequestMethod.POST])
-    fun add(@RequestBody requestTorrent: RequestTorrent): ResponseEntity<Any> {
-        return torrentClientService.addTorrentFile(requestTorrent.fileUri)
+    fun requestByMagent(@RequestBody magnet: String): ResponseEntity<Any> {
+        return torrentClientService.requestByMagnet(magnet)
     }
 
     @RequestMapping(method = [RequestMethod.GET], value = ["/folder/{hash}"])
@@ -58,5 +58,4 @@ class TorrentRestController @Autowired constructor(@Autowired protected val torr
     }
 }
 
-class RequestTorrent(val fileUri:String)
 class FileModel(val name: String, val path: String, val mimeType: String)

@@ -1,8 +1,14 @@
 package com.vieto.service
 
-import com.turn.ttorrent.client.Client
-import com.turn.ttorrent.client.SharedTorrent
-import com.turn.ttorrent.common.Torrent
+import bt.Bt
+import bt.data.file.FileSystemStorage
+import bt.dht.DHTConfig
+import bt.dht.DHTModule
+import bt.magnet.MagnetUri
+import bt.magnet.MagnetUriParser
+import bt.runtime.BtClient
+import bt.runtime.Config
+import bt.torrent.TorrentSessionState
 import com.vieto.controller.storage.FileSystemStorageService
 import com.vieto.controller.storage.StorageException
 import com.vieto.database.TorrentRepository
@@ -13,73 +19,69 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.stereotype.Service
-import org.springframework.util.StringUtils
+import org.springframework.util.Base64Utils
 import java.io.File
-import java.net.InetAddress
+import java.lang.ref.WeakReference
 import java.util.*
-import java.util.concurrent.Semaphore
-import java.util.concurrent.TimeUnit
+import java.util.function.Consumer
 
 @Service
 class TorrentClientService constructor(@Autowired val torrentRepository: TorrentRepository,
-                                       @Autowired val storageService: FileSystemStorageService): Observer {
+                                       @Autowired val storageService: FileSystemStorageService) {
 
     companion object {
         const val TORRENT_CLIENT_POOL_COUNT = 2
     }
 
-    private val clientSemaphore = Semaphore(TORRENT_CLIENT_POOL_COUNT)
-    private val currentDownloadMap = HashMap<String, Client>()
+    private val currentDownloadMap = HashMap<String, BtClient>()
     private val downloadProgressCache = HashMap<String, Float>()
     private val logger = LoggerFactory.getLogger(TorrentClientService::class.java)
 
     fun getList():List<TorrentModel> = torrentRepository.findAll()
 
-    fun addTorrentFile(fileUri: String): ResponseEntity<Any> {
-        val hash = StringUtils.getFilename(fileUri) ?: return ResponseEntity.badRequest().body("Invalid file uri, $fileUri")
-        val file = storageService.load(hash).toFile()
+    fun requestByMagnet(magnet: String): ResponseEntity<Any> {
         try {
+            val magnetUri = MagnetUriParser.parser().parse(magnet)
+            val file = storageService.load(magnetUri.hash()).toFile()
             if (file.exists() == false || file.isDirectory) {
                 return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                         .body("Failed to load file")
             }
-            val torrentRequest = Torrent.load(file)
-            val status = requestDownload(torrentRequest)
+            val status = requestDownload(magnetUri)
             if (status.is2xxSuccessful) {
-                var torrentModel = TorrentModel(torrentRequest.name, torrentRequest.filenames, torrentRequest.hexInfoHash,
-                        torrentRequest.size, fileUri, torrentRequest.comment, torrentRequest.createdBy)
+                val name = magnetUri.displayName.orElseGet { "" }
+                var torrentModel = TorrentModel(name, magnetUri.hash())
                 torrentModel = torrentRepository.insert(torrentModel)
                 torrentModel.status = Status.Downloading
                 torrentRepository.save(torrentModel)
             }
             return ResponseEntity.status(status).build()
+        } catch (e: IllegalArgumentException) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(e.message)
         } catch (e: Exception) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(e.message)
         }
     }
 
-    fun requestDownload(torrentRequest: Torrent): HttpStatus {
-        if (clientSemaphore.tryAcquire(1, TimeUnit.SECONDS) == false) {
-            return HttpStatus.TOO_MANY_REQUESTS
-        }
-
+    @Throws(IllegalArgumentException::class)
+    fun requestDownload(magnetUri: MagnetUri): HttpStatus {
         synchronized(currentDownloadMap) {
-            if (currentDownloadMap.containsKey(torrentRequest.hexInfoHash)) {
+            val torrentHash = magnetUri.hash()
+            if (currentDownloadMap.containsKey(torrentHash)) {
                 return HttpStatus.BAD_REQUEST
             }
 
             // destination folder
-            val destinationFolder = File(storageService.rootLocation.toFile(), torrentRequest.hexInfoHash)
+            val destinationFolder = File(storageService.rootLocation.toFile(), torrentHash)
             if (destinationFolder.exists() == false) {
                 destinationFolder.mkdir()
             }
-            val client = Client(InetAddress.getLocalHost(), SharedTorrent(torrentRequest, destinationFolder))
-            client.setMaxDownloadRate(50.0)
-            client.setMaxUploadRate(50.0)
-            client.download()
-            client.addObserver(this)
-            currentDownloadMap[torrentRequest.hexInfoHash] = client
+
+            val client = createTorrentClient(destinationFolder, magnetUri)
+            client.startAsync(DownloadListener(client, torrentHash, this@TorrentClientService), 1000)
+            currentDownloadMap[torrentHash] = client
         }
         return HttpStatus.OK
     }
@@ -95,9 +97,7 @@ class TorrentClientService constructor(@Autowired val torrentRepository: Torrent
         var canceled = false
         synchronized(currentDownloadMap) {
             currentDownloadMap.remove(hash)?.let {
-                it.deleteObserver(this)
                 it.stop()
-                clientSemaphore.release()
                 canceled = true
             }
             return try {
@@ -111,37 +111,67 @@ class TorrentClientService constructor(@Autowired val torrentRepository: Torrent
         }
     }
 
-    override fun update(o: Observable?, arg: Any?) {
-        val c = o as Client
-        val hash = c.torrent.hexInfoHash
-
+    private fun onUpdateTorrentSessionState(client: BtClient, hash: String, sessionState: TorrentSessionState) {
         synchronized(downloadProgressCache) {
-            val progress = c.torrent.completion
-            downloadProgressCache[hash] = progress
+            downloadProgressCache[hash] = sessionState.piecesTotal.toFloat() / sessionState.downloaded.toFloat()
         }
 
-        if (c.state == Client.ClientState.DONE ||
-                c.state == Client.ClientState.SEEDING ||
-                c.state == Client.ClientState.ERROR) {
+        if (sessionState.piecesComplete == sessionState.piecesTotal) { // complete
             synchronized(currentDownloadMap) {
                 currentDownloadMap.remove(hash)
             }
-            c.stop()
-            clientSemaphore.release()
-
+            client.stop()
             // update db
             val torrentModel = torrentRepository.findByHash(hash)
             if (torrentModel == null) {
-                logger.warn("[requestDownload] Failed to find torrent model by hash. name: $hash hash: ${c.torrent.name}")
+                logger.warn("[requestDownload] Failed to find torrent model by hash. hash: $hash")
                 return
-            }
-            torrentModel.status = when (c.state) {
-                Client.ClientState.DONE, Client.ClientState.SEEDING  -> Status.Success
-                Client.ClientState.ERROR -> Status.Failure
-                else -> torrentModel.status
             }
             torrentRepository.save(torrentModel)
             downloadProgressCache.remove(hash)
+        }
+    }
+
+    private fun createTorrentClient(downloadPath: File, magnetUri: MagnetUri): BtClient {
+        val config = object : Config() {
+            override fun getNumOfHashingThreads(): Int {
+                return Runtime.getRuntime().availableProcessors() * 2;
+            }
+        }
+
+        // enable bootstrapping from public routers
+        val dhtModule = DHTModule(object: DHTConfig() {
+            override fun shouldUseRouterBootstrap(): Boolean {
+                return true
+            }
+        })
+
+        // get download directory
+        val targetDirectory = downloadPath.toPath()
+
+        // create file system based backend for torrent data
+        val storage = FileSystemStorage(targetDirectory)
+
+        // create client with a private runtime
+        return Bt.client()
+                .config(config)
+                .storage(storage)
+                .magnet(magnetUri)
+                .autoLoadModules()
+                .module(dhtModule)
+                .stopWhenDownloaded()
+                .build()
+    }
+
+    private fun MagnetUri.hash(): String {
+        return Base64Utils.encodeToString(torrentId.bytes)
+    }
+
+    private class DownloadListener(val client: BtClient, val hash: String, service: TorrentClientService): Consumer<TorrentSessionState> {
+        private val serviceRef = WeakReference(service)
+
+        override fun accept(t: TorrentSessionState) {
+            serviceRef.get()?.onUpdateTorrentSessionState(client, hash, t)
         }
     }
 }
