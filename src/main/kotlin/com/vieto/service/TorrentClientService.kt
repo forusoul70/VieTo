@@ -42,11 +42,6 @@ class TorrentClientService constructor(@Autowired val torrentRepository: Torrent
     fun requestByMagnet(magnet: String): ResponseEntity<Any> {
         try {
             val magnetUri = MagnetUriParser.parser().parse(magnet)
-            val file = storageService.load(magnetUri.hash()).toFile()
-            if (file.exists() == false || file.isDirectory) {
-                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                        .body("Failed to load file")
-            }
             val status = requestDownload(magnetUri)
             if (status.is2xxSuccessful) {
                 val name = magnetUri.displayName.orElseGet { "" }
@@ -168,9 +163,11 @@ class TorrentClientService constructor(@Autowired val torrentRepository: Torrent
     }
 
     private class DownloadListener(val client: BtClient, val hash: String, service: TorrentClientService): Consumer<TorrentSessionState> {
+        private val logger = LoggerFactory.getLogger(DownloadListener::class.java)
         private val serviceRef = WeakReference(service)
 
         override fun accept(t: TorrentSessionState) {
+            logger.info("[DownloadListener] ${t.downloaded}")
             serviceRef.get()?.onUpdateTorrentSessionState(client, hash, t)
         }
     }

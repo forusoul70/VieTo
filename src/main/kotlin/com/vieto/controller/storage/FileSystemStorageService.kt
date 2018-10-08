@@ -19,7 +19,7 @@ class FileSystemStorageService @Autowired constructor(properties: StoragePropert
         try {
             Files.createDirectories(rootLocation)
         } catch (e: IOException) {
-            throw StorageException("Could not initialize storage")
+            throw StorageException("Could not initialize storage :  $rootLocation")
         }
     }
 
