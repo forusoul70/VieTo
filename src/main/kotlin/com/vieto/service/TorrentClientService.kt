@@ -24,6 +24,7 @@ import java.io.File
 import java.lang.ref.WeakReference
 import java.util.*
 import java.util.function.Consumer
+import kotlin.math.log
 
 @Service
 class TorrentClientService constructor(@Autowired val torrentRepository: TorrentRepository,
@@ -40,9 +41,11 @@ class TorrentClientService constructor(@Autowired val torrentRepository: Torrent
     fun getList():List<TorrentModel> = torrentRepository.findAll()
 
     fun requestByMagnet(magnet: String): ResponseEntity<Any> {
+        logger.info("[requestByMagnet] $magnet")
         try {
             val magnetUri = MagnetUriParser.parser().parse(magnet)
             val status = requestDownload(magnetUri)
+            logger.info("[requestByMagnet] $status")
             if (status.is2xxSuccessful) {
                 val name = magnetUri.displayName.orElseGet { "" }
                 var torrentModel = TorrentModel(name, magnetUri.hash())

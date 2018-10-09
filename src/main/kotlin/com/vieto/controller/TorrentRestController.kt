@@ -3,6 +3,7 @@ package com.vieto.controller
 
 import com.vieto.controller.storage.StorageService
 import com.vieto.model.DownloadingTorrentModel
+import com.vieto.model.MagnetRequestModel
 import com.vieto.model.Status
 import com.vieto.model.TorrentModel
 import com.vieto.service.TorrentClientService
@@ -28,8 +29,8 @@ class TorrentRestController @Autowired constructor(@Autowired protected val torr
     }
 
     @RequestMapping(method = [RequestMethod.POST])
-    fun requestByMagent(@RequestBody magnet: String): ResponseEntity<Any> {
-        return torrentClientService.requestByMagnet(magnet)
+    fun requestByMagent(@RequestBody magnet: MagnetRequestModel): ResponseEntity<Any> {
+        return torrentClientService.requestByMagnet(magnet.magnet)
     }
 
     @RequestMapping(method = [RequestMethod.GET], value = ["/folder/{hash}"])
