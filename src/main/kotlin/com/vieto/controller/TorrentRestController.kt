@@ -12,6 +12,7 @@ import org.springframework.http.ResponseEntity
 import org.springframework.util.InvalidMimeTypeException
 import org.springframework.util.MimeType
 import org.springframework.web.bind.annotation.*
+import java.io.File
 
 @RestController
 @RequestMapping("/torrent")
@@ -41,16 +42,29 @@ class TorrentRestController @Autowired constructor(@Autowired protected val torr
             return ResponseEntity.badRequest().body(listOf())
         }
 
-        val fileList = folder.listFiles().map {
-            val mimeType = try {
-                MimeType.valueOf(it.extension).toString()
-            } catch (e: InvalidMimeTypeException) {
-                "Invalid"
-            }
-            FileModel(it.name, it.path, mimeType)
+        val fileList = getFileListFromFolder(folder)
+        return ResponseEntity.ok(fileList)
+    }
+
+    private fun getFileListFromFolder(folder: File): List<FileModel> {
+        if (folder.exists() == false || folder.isDirectory == false) { // invalid
+            return listOf()
         }
 
-        return ResponseEntity.ok(fileList)
+        val fileList = ArrayList<FileModel>()
+        folder.listFiles().forEach {
+            if (it.isDirectory) {
+                fileList.addAll(getFileListFromFolder(it))
+            } else {
+                val mimeType = try {
+                    MimeType.valueOf(it.extension).toString()
+                } catch (e: InvalidMimeTypeException) {
+                    "Invalid"
+                }
+                fileList.add(FileModel(it.name, it.path, mimeType))
+            }
+        }
+        return fileList
     }
 
     @RequestMapping(method = [RequestMethod.DELETE], value = ["/{hash}"])
