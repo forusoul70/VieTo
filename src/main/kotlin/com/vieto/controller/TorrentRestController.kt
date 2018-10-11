@@ -13,6 +13,7 @@ import org.springframework.util.InvalidMimeTypeException
 import org.springframework.util.MimeType
 import org.springframework.web.bind.annotation.*
 import java.io.File
+import java.nio.file.Paths
 
 @RestController
 @RequestMapping("/torrent")
@@ -61,7 +62,8 @@ class TorrentRestController @Autowired constructor(@Autowired protected val torr
                 } catch (e: InvalidMimeTypeException) {
                     "Invalid"
                 }
-                fileList.add(FileModel(it.name, it.path, mimeType))
+                val path = Paths.get(it.absolutePath)
+                fileList.add(FileModel(it.name, storageService.removeRootPathIfExist(path).toString(), mimeType))
             }
         }
         return fileList
