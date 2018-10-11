@@ -111,7 +111,7 @@ class TorrentClientService constructor(@Autowired val torrentRepository: Torrent
 
     private fun onUpdateTorrentSessionState(client: BtClient, hash: String, sessionState: TorrentSessionState) {
         synchronized(downloadProgressCache) {
-            downloadProgressCache[hash] = sessionState.piecesTotal.toFloat() / sessionState.downloaded.toFloat()
+            downloadProgressCache[hash] = sessionState.piecesComplete.toFloat() / sessionState.piecesTotal.toFloat()
         }
 
         if (sessionState.piecesComplete == sessionState.piecesTotal) { // complete
@@ -125,6 +125,7 @@ class TorrentClientService constructor(@Autowired val torrentRepository: Torrent
                 logger.warn("[requestDownload] Failed to find torrent model by hash. hash: $hash")
                 return
             }
+            torrentModel.status = Status.Success
             torrentRepository.save(torrentModel)
             downloadProgressCache.remove(hash)
         }
