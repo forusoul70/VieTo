@@ -19,10 +19,12 @@ class ResourceStreamController(private val storageService: StorageService) {
 
     @RequestMapping("**", method = [RequestMethod.GET])
     fun getVideoResource(request: HttpServletRequest, response: HttpServletResponse) {
-        val path = URLDecoder.decode(request.requestURI.let { return@let it.substring("/stream/".length) }, "UTF-8")
+        val path = request.requestURI.substring("/stream/".length)
         val resourcePath = storageService.load(path)
         val resource = resourcePath.toFile()
+        logger.info("[getVideoResource]")
         if (resource.exists() == false) {
+            resource.outputStream().write("$resource".toByteArray())
             response.status = HttpStatus.NOT_FOUND.value()
             return
         }
