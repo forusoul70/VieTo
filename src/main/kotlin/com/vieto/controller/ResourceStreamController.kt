@@ -19,7 +19,7 @@ class ResourceStreamController(private val storageService: StorageService) {
 
     @RequestMapping("**", method = [RequestMethod.GET])
     fun getVideoResource(request: HttpServletRequest, response: HttpServletResponse) {
-        val path = request.requestURI.substring("/stream/".length)
+        val path = URLDecoder.decode(request.requestURI.let { return@let it.substring("/stream?path=".length) }, "UTF-8")
         val resourcePath = storageService.load(path)
         val resource = resourcePath.toFile()
         logger.info("[getVideoResource]")
