@@ -18,8 +18,7 @@ class ResourceStreamController(private val storageService: StorageService) {
     private val logger = LoggerFactory.getLogger(ResourceStreamController::class.java)
 
     @RequestMapping("**", method = [RequestMethod.GET])
-    fun getVideoResource(request: HttpServletRequest, response: HttpServletResponse) {
-        val path = URLDecoder.decode(request.requestURI.let { return@let it.substring("/stream?path=".length) }, "UTF-8")
+    fun getVideoResource(@RequestParam("path") path: String, request: HttpServletRequest, response: HttpServletResponse) {
         val resourcePath = storageService.load(path)
         val resource = resourcePath.toFile()
         logger.info("[getVideoResource]")
