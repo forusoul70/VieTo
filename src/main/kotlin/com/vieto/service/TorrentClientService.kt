@@ -78,7 +78,10 @@ class TorrentClientService constructor(@Autowired val torrentRepository: Torrent
             }
 
             val client = createTorrentClient(destinationFolder, magnetUri)
-            client.startAsync(DownloadListener(client, torrentHash, this@TorrentClientService), 1000)
+            val future = client.startAsync(DownloadListener(torrentHash, this@TorrentClientService), 1000)
+            future.whenComplete { _, _ ->
+                onFinishSessionState(torrentHash)
+            }
             currentDownloadMap[torrentHash] = client
         }
         return HttpStatus.OK
@@ -109,24 +112,27 @@ class TorrentClientService constructor(@Autowired val torrentRepository: Torrent
         }
     }
 
-    private fun onUpdateTorrentSessionState(client: BtClient, hash: String, sessionState: TorrentSessionState) {
+    private fun onUpdateTorrentSessionState(hash: String, sessionState: TorrentSessionState) {
         synchronized(downloadProgressCache) {
             downloadProgressCache[hash] = sessionState.piecesComplete.toFloat() / sessionState.piecesTotal.toFloat()
         }
+    }
 
-        if (sessionState.piecesComplete == sessionState.piecesTotal) { // complete
-            synchronized(currentDownloadMap) {
-                currentDownloadMap.remove(hash)
-            }
-            client.stop()
-            // update db
-            val torrentModel = torrentRepository.findByHash(hash)
-            if (torrentModel == null) {
-                logger.warn("[requestDownload] Failed to find torrent model by hash. hash: $hash")
-                return
-            }
-            torrentModel.status = Status.Success
-            torrentRepository.save(torrentModel)
+    private fun onFinishSessionState(hash: String) {
+        synchronized(currentDownloadMap) {
+            currentDownloadMap.remove(hash)
+        }
+
+        // update db
+        val torrentModel = torrentRepository.findByHash(hash)
+        if (torrentModel == null) {
+            logger.warn("[onFinishSessionState] Failed to find torrent model by hash. hash: $hash")
+            return
+        }
+        logger.warn("[onFinishSessionState] finish: $hash")
+        torrentModel.status = Status.Success
+        torrentRepository.save(torrentModel)
+        synchronized(downloadProgressCache) {
             downloadProgressCache.remove(hash)
         }
     }
@@ -166,13 +172,12 @@ class TorrentClientService constructor(@Autowired val torrentRepository: Torrent
         return Base64Utils.encodeToString(torrentId.bytes)
     }
 
-    private class DownloadListener(val client: BtClient, val hash: String, service: TorrentClientService): Consumer<TorrentSessionState> {
+    private class DownloadListener(val hash: String, service: TorrentClientService): Consumer<TorrentSessionState> {
         private val logger = LoggerFactory.getLogger(DownloadListener::class.java)
         private val serviceRef = WeakReference(service)
 
         override fun accept(t: TorrentSessionState) {
-            logger.info("[DownloadListener] ${t.downloaded}")
-            serviceRef.get()?.onUpdateTorrentSessionState(client, hash, t)
+            serviceRef.get()?.onUpdateTorrentSessionState(hash, t)
         }
     }
 }
