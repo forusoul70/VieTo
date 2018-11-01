@@ -23,17 +23,18 @@ import org.springframework.util.Base64Utils
 import java.io.File
 import java.lang.ref.WeakReference
 import java.util.*
+import java.util.concurrent.Semaphore
 import java.util.function.Consumer
-import kotlin.math.log
 
 @Service
 class TorrentClientService constructor(@Autowired val torrentRepository: TorrentRepository,
                                        @Autowired val storageService: FileSystemStorageService) {
 
     companion object {
-        const val TORRENT_CLIENT_POOL_COUNT = 2
+        const val TORRENT_CLIENT_POOL_COUNT = 1
     }
 
+    private val requestLock = Semaphore(TORRENT_CLIENT_POOL_COUNT)
     private val currentDownloadMap = HashMap<String, BtClient>()
     private val downloadProgressCache = HashMap<String, Float>()
     private val logger = LoggerFactory.getLogger(TorrentClientService::class.java)
@@ -43,6 +44,10 @@ class TorrentClientService constructor(@Autowired val torrentRepository: Torrent
     fun requestByMagnet(magnet: String): ResponseEntity<Any> {
         logger.info("[requestByMagnet] $magnet")
         try {
+            if (requestLock.tryAcquire() == false) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("Sever is busy")
+            }
+
             val magnetUri = MagnetUriParser.parser().parse(magnet)
             val status = requestDownload(magnetUri)
             logger.info("[requestByMagnet] $status")
@@ -119,6 +124,7 @@ class TorrentClientService constructor(@Autowired val torrentRepository: Torrent
     }
 
     private fun onFinishSessionState(hash: String) {
+        requestLock.release()
         synchronized(currentDownloadMap) {
             currentDownloadMap.remove(hash)
         }
@@ -140,7 +146,7 @@ class TorrentClientService constructor(@Autowired val torrentRepository: Torrent
     private fun createTorrentClient(downloadPath: File, magnetUri: MagnetUri): BtClient {
         val config = object : Config() {
             override fun getNumOfHashingThreads(): Int {
-                return Runtime.getRuntime().availableProcessors() * 2;
+                return 1
             }
         }
 
